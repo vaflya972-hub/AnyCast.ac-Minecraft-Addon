@@ -13,7 +13,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Signed player address that the anycast.ac edge appends to the server address
- * of a login handshake. See PROTOCOL.md.
+ * of a login handshake.
  *
  * <pre>
  * host field = name "///" base64url(payload) [tail starting with \0, e.g. Forge marker]
