@@ -1,0 +1,5 @@
+# Адреса anycast.ac, с которых край подключается к серверам.
+# Встроенный запасной список: плагин сам скачивает актуальный.
+# anycast.ac edge addresses. Built-in fallback, the plugin downloads the current list.
+185.219.84.169
+2a0d:5940:79:123::2

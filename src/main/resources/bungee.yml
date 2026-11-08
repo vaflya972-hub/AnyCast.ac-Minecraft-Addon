@@ -1,0 +1,5 @@
+name: AnyCast
+version: ${project.version}
+main: ac.anycast.mc.bungee.BungeeAddon
+author: anycast.ac
+description: Real player IPs and origin lock for servers behind anycast.ac

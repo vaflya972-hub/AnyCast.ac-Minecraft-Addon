@@ -1,0 +1,34 @@
+# AnyCast.ac Minecraft Addon
+# https://github.com/vaflya972-hub/AnyCast.ac-Minecraft-Addon
+# После правки: /anycast reload. After editing: /anycast reload.
+
+# Ключ сервера из панели: anycast.ac → Minecraft → ваш сервер → «Сервер» → «Адрес игрока».
+# Без ключа игроки видны с адресом anycast.ac, а не со своим.
+# Server key from the panel: anycast.ac → Minecraft → your server → Server → Player address.
+key: ""
+
+# Пускать соединения только с адресов anycast.ac: прямые атаки на адрес сервера
+# закрываются сразу, до разбора пакетов. Выключайте, только если в сервер ходят и напрямую.
+# Accept connections only from anycast.ac. Direct connections are closed before
+# any packet is read. Turn off only if players also join directly.
+only-anycast: true
+
+# Откуда брать список адресов anycast.ac и как часто его обновлять (минуты).
+# Если скачать не вышло, работает прошлый список (ip-cache.txt) или встроенный.
+# Where to get the anycast.ac address list and how often to refresh it (minutes).
+ip-list-url: "https://anycast.ac/ips/minecraft.txt"
+ip-list-refresh-minutes: 10
+
+# Свои адреса мимо проверки: консоль хостинга, локальные боты, мониторинг. Можно сети (CIDR).
+# Your own addresses that skip the check: hosting panel, local bots, monitoring. CIDR works.
+allow:
+  - 127.0.0.1
+  - ::1
+
+# Сколько секунд подпись входа считается свежей. Часы сервера должны идти по NTP.
+# How many seconds a login signature stays valid. Keep the server clock in sync (NTP).
+signature-max-age-seconds: 600
+
+# Писать в лог каждое закрытое соединение и каждый проверенный вход.
+# Log every closed connection and every verified login.
+debug: false

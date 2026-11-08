@@ -1,0 +1,18 @@
+name: AnyCast
+version: ${project.version}
+main: ac.anycast.mc.paper.PaperAddon
+api-version: '1.17'
+load: STARTUP
+folia-supported: true
+author: anycast.ac
+website: https://anycast.ac
+description: Real player IPs and origin lock for servers behind anycast.ac
+commands:
+  anycast:
+    description: AnyCast.ac addon status. /anycast reload re-reads config.yml
+    usage: /anycast [reload]
+    permission: anycast.admin
+permissions:
+  anycast.admin:
+    description: Use /anycast
+    default: op

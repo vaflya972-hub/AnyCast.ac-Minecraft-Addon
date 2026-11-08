@@ -1,0 +1,10 @@
+{
+  "id": "anycast",
+  "name": "AnyCast.ac Minecraft Addon",
+  "version": "${project.version}",
+  "description": "Real player IPs and origin lock for servers behind anycast.ac",
+  "url": "https://anycast.ac",
+  "authors": ["anycast.ac"],
+  "dependencies": [],
+  "main": "ac.anycast.mc.velocity.VelocityAddon"
+}

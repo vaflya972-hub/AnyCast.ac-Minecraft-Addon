@@ -1,0 +1,145 @@
+package ac.anycast.mc.bungee;
+
+import ac.anycast.mc.core.Addon;
+import ac.anycast.mc.core.AddonLog;
+import ac.anycast.mc.core.Reflect;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.util.ArrayList;
+import java.util.List;
+import net.md_5.bungee.api.CommandSender;
+import net.md_5.bungee.api.chat.TextComponent;
+import net.md_5.bungee.api.connection.PendingConnection;
+import net.md_5.bungee.api.event.PlayerHandshakeEvent;
+import net.md_5.bungee.api.plugin.Command;
+import net.md_5.bungee.api.plugin.Listener;
+import net.md_5.bungee.api.plugin.Plugin;
+import net.md_5.bungee.event.EventHandler;
+import net.md_5.bungee.event.EventPriority;
+import net.md_5.bungee.protocol.packet.Handshake;
+
+/**
+ * BungeeCord and Waterfall. Direct connections are closed in ClientConnectEvent
+ * (before BungeeCord reads anything); the signature is handled in PlayerHandshakeEvent.
+ */
+public final class BungeeAddon extends Plugin implements Listener {
+    private Addon addon;
+    private boolean connectGate;
+
+    @Override
+    public void onEnable() {
+        addon = new Addon(getDataFolder().toPath(), AddonLog.of(getLogger()), "BungeeCord");
+        try {
+            addon.start();
+        } catch (Exception e) {
+            getLogger().severe("Cannot start, players will NOT be checked: " + e);
+            return;
+        }
+        getProxy().getPluginManager().registerListener(this, this);
+        try {
+            Class.forName("net.md_5.bungee.api.event.ClientConnectEvent");
+            getProxy().getPluginManager().registerListener(this, new ConnectGate(addon));
+            connectGate = true;
+        } catch (ClassNotFoundException e) {
+            getLogger().warning("This BungeeCord has no ClientConnectEvent: direct connections are closed at the handshake instead.");
+        }
+        try {
+            if (getProxy().getConfig().getThrottle() > 0) {
+                getLogger().warning("connection_throttle is on in config.yml of BungeeCord. All players come from a few anycast.ac addresses, "
+                        + "so set connection_throttle: -1 (anycast.ac limits connections per player address itself).");
+            }
+        } catch (Throwable ignored) {
+            // older API
+        }
+        getProxy().getPluginManager().registerCommand(this, new Command("anycast", "anycast.admin") {
+            @Override
+            public void execute(CommandSender sender, String[] args) {
+                List<String> lines;
+                if (args.length > 0 && args[0].equalsIgnoreCase("reload")) {
+                    try {
+                        lines = new ArrayList<>(addon.reload());
+                        lines.addAll(addon.status());
+                    } catch (Exception e) {
+                        lines = List.of("Reload failed: " + e.getMessage());
+                    }
+                } else {
+                    lines = addon.status();
+                }
+                for (String l : lines) {
+                    sender.sendMessage(new TextComponent(l));
+                }
+            }
+        });
+    }
+
+    @Override
+    public void onDisable() {
+        if (addon != null) {
+            addon.stop();
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onHandshake(PlayerHandshakeEvent e) {
+        PendingConnection conn = e.getConnection();
+        Handshake hs = e.getHandshake();
+        SocketAddress sa = conn.getSocketAddress();
+        InetSocketAddress remote = sa instanceof InetSocketAddress isa ? isa : null;
+        if (!connectGate && remote != null && !addon.acceptsConnection(remote.getAddress())) {
+            close(conn);
+            return;
+        }
+        Addon.Decision d = addon.decide(remote, hs.getHost(), hs.getRequestedProtocol());
+        switch (d.action()) {
+            case PASS -> {
+            }
+            // BungeeCord cannot send a kick before the login state: close quietly, the log says why.
+            case DROP, KICK -> close(conn);
+            case REWRITE -> {
+                String host = d.host();
+                if (host.endsWith(".")) {
+                    host = host.substring(0, host.length() - 1);
+                }
+                hs.setHost(host);
+                try {
+                    Field vh = Reflect.field(conn.getClass(), "virtualHost");
+                    if (vh != null) {
+                        vh.set(conn, InetSocketAddress.createUnresolved(host, hs.getPort()));
+                    }
+                    if (d.address() != null) {
+                        setAddress(conn, d.address());
+                    }
+                } catch (Exception | LinkageError ex) {
+                    getLogger().warning("Cannot set the player address on this BungeeCord version: " + ex);
+                }
+            }
+        }
+    }
+
+    /** InitialHandler.ch is a ChannelWrapper; HAProxy support sets the address the same way. */
+    private static void setAddress(PendingConnection conn, InetSocketAddress real) throws Exception {
+        Field chField = Reflect.field(conn.getClass(), "ch");
+        if (chField == null) {
+            throw new NoSuchFieldException("InitialHandler.ch");
+        }
+        Object ch = chField.get(conn);
+        try {
+            Method m = ch.getClass().getMethod("setRemoteAddress", SocketAddress.class);
+            m.invoke(ch, real);
+        } catch (NoSuchMethodException e) {
+            Reflect.addressField(ch.getClass(), "remoteAddress", "").set(ch, real);
+        }
+    }
+
+    private static void close(PendingConnection conn) {
+        try {
+            Field chField = Reflect.field(conn.getClass(), "ch");
+            Object ch = chField.get(conn);
+            ch.getClass().getMethod("close").invoke(ch);
+        } catch (Exception e) {
+            conn.disconnect(new TextComponent(""));
+        }
+    }
+}
