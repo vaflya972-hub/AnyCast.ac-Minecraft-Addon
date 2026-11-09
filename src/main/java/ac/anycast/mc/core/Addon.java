@@ -25,12 +25,32 @@ public final class Addon {
     public static final String KICK_BAD_SIGNATURE =
             "AnyCast.ac: подпись входа не прошла проверку. Сообщите администратору сервера.\n"
             + "AnyCast.ac: login signature check failed. Please tell the server administrator.";
+    public static final String KICK_NO_ADDRESS =
+            "AnyCast.ac: сервер не смог принять ваш адрес. Сообщите администратору сервера.\n"
+            + "AnyCast.ac: the server could not apply your address. Please tell the server administrator.";
+
+    /** Forge markers a real client may append after "\0" (the same list as the anycast.ac edge). */
+    static final java.util.Set<String> FORGE_MARKERS = java.util.Set.of("FML", "FML2", "FML3", "FORGE");
+    /** Most logins we remember for replay checks; above that new logins are refused rather than forgotten. */
+    static final int MAX_SEEN = 200_000;
+    private static final InetAddress LOOP4 = literal(new byte[] {127, 0, 0, 1});
+    private static final InetAddress LOOP6 = literal(new byte[] {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
+
+    private static InetAddress literal(byte[] b) {
+        try {
+            return InetAddress.getByAddress(b);
+        } catch (java.net.UnknownHostException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 
     public final String version;
     public final IpList ips;
     public final AtomicLong blockedConnections = new AtomicLong();
     public final AtomicLong verifiedLogins = new AtomicLong();
     public final AtomicLong rejectedLogins = new AtomicLong();
+    /** Logins straight to the server, around anycast.ac (only with allow-direct). */
+    public final AtomicLong directLogins = new AtomicLong();
 
     private final Path dir;
     private final AddonLog log;
@@ -43,6 +63,7 @@ public final class Addon {
     private volatile List<Cidr> allow = List.of();
     private ScheduledExecutorService exec;
     private ScheduledFuture<?> refreshTask;
+    private ScheduledFuture<?> sweepTask;
 
     public Addon(Path dir, AddonLog log, String platform) {
         this.dir = dir;
@@ -68,6 +89,8 @@ public final class Addon {
             exec.shutdownNow();
             exec = null;
         }
+        refreshTask = null;
+        sweepTask = null;
     }
 
     /** Re-reads config.yml and downloads the list again. Returns lines for the command sender. */
@@ -82,13 +105,26 @@ public final class Addon {
             out.add("config.yml: key must be the 43-character key from the anycast.ac panel");
         }
         List<Cidr> al = new ArrayList<>();
+        boolean loopback = false;
         for (String s : c.allow) {
             Cidr x = Cidr.parse(s);
             if (x == null) {
                 out.add("config.yml: allow: \"" + s + "\" is not an IP address or network");
+            } else if (x.tooBroad(8, 16)) {
+                out.add("config.yml: allow: \"" + s + "\" is too wide (wider than /8 or /16 for IPv6), skipped");
             } else {
                 al.add(x);
+                loopback |= x.contains(LOOP4) || x.contains(LOOP6);
             }
+        }
+        if (loopback) {
+            out.add("config.yml: allow has a local address (127.0.0.1 or ::1). Connections from it skip every check. "
+                    + "If a tunnel agent (playit.gg, ngrok, frp, ssh -R) runs on this machine, every player comes from there: remove the local address.");
+        }
+        if (c.allowDirect) {
+            out.add("config.yml: allow-direct is on, players can also join straight to this server, around anycast.ac. "
+                    + "They get no anycast.ac protection from DDoS and bots, bans and country blocks from the panel do not apply to them, "
+                    + "and anyone who learns the server address can attack it directly. Turn it off unless you know why you need it.");
         }
         cfg = c;
         key = k;
@@ -99,11 +135,14 @@ public final class Addon {
         if (exec != null) {
             refreshTask = exec.scheduleWithFixedDelay(
                     () -> ips.refresh(cfg.ipListUrl, userAgent()), 0, c.ipListRefreshMinutes, TimeUnit.MINUTES);
+            if (sweepTask == null) {
+                sweepTask = exec.scheduleWithFixedDelay(this::sweepSeen, 1, 1, TimeUnit.MINUTES);
+            }
         }
         for (String s : out) {
             log.warn(s);
         }
-        log.info("AnyCast.ac Minecraft Addon " + version + " on " + platform + ": only-anycast " + (c.onlyAnycast ? "on" : "off")
+        log.info("AnyCast.ac Minecraft Addon " + version + " on " + platform + ": direct players " + (c.allowDirect ? "ALLOWED" : "blocked")
                 + ", key " + (k != null ? "set" : "NOT set") + ", " + "edge addresses: " + ips.size() + " (" + ips.source() + ")");
         if (k == null) {
             log.warn("No key yet: copy it from anycast.ac → Minecraft → your server → Server → Plugin into config.yml, then run /anycast reload");
@@ -123,9 +162,19 @@ public final class Addon {
         return log;
     }
 
+    /** An address from the allow list: a proxy or tool the owner trusts, it skips every check. */
+    public boolean trusted(InetAddress a) {
+        return a != null && allowed(a);
+    }
+
+    /** An anycast.ac edge address. */
+    public boolean edge(InetAddress a) {
+        return a != null && ips.contains(a);
+    }
+
     /** Connection-level check, before any byte is read. */
     public boolean acceptsConnection(InetAddress a) {
-        if (a == null || !cfg.onlyAnycast) {
+        if (a == null || cfg.allowDirect) {
             return true;
         }
         if (allowed(a) || ips.contains(a)) {
@@ -179,24 +228,47 @@ public final class Addon {
      * @param intent 1 status, 2 login, 3 transfer
      */
     public Decision decide(InetSocketAddress remote, String host, int intent) {
-        boolean login = intent == 2 || intent == 3;
+        boolean login = intent != 1; // 2 login, 3 transfer (1.20.5+); anything else the server refuses itself
         InetAddress ra = remote == null ? null : remote.getAddress();
         boolean fromEdge = ra != null && ips.contains(ra);
         boolean fromAllow = ra != null && allowed(ra);
         byte[] k = key;
         Payload.Split sp = Payload.split(host);
+        String plain = sp == null ? host : sp.cleaned();
+
+        // Forwarding data from a player ("name\0IP\0UUID" of BungeeCord, "///" of TCPShield):
+        // a server in BungeeCord mode would take it as the real address and UUID.
+        // Only a proxy from the allow list may send it.
+        if (!fromAllow) {
+            String safe = safeHost(plain);
+            if (safe == null) {
+                if (login) {
+                    rejectedLogins.incrementAndGet();
+                    warn("forwarding", "Dropped a login with forwarding data in the server address from " + addr(ra)
+                            + ": someone tried to fake a player address or UUID.");
+                }
+                return Decision.DROP;
+            }
+            plain = safe;
+        }
 
         if (sp == null) {
             if (login && fromEdge && !fromAllow) {
                 if (k != null) {
                     rejectedLogins.incrementAndGet();
-                    warn("unsigned", "Rejected a login through anycast.ac without a signature (" + ra.getHostAddress()
+                    warn("unsigned", "Rejected a login through anycast.ac without a signature (" + addr(ra)
                             + "). Set \"Player address: Plugin\" for this server in the anycast.ac panel.");
                     return Decision.kick(KICK_UNSIGNED);
                 }
                 warn("nokey", "Players come through anycast.ac but config.yml has no key, so they are seen with the edge address.");
             }
-            return Decision.PASS;
+            if (login && !fromEdge && !fromAllow) {
+                directLogins.incrementAndGet();
+                if (cfg.debug) {
+                    log.info("Direct login from " + addr(ra) + " (allow-direct is on)");
+                }
+            }
+            return plain.equals(host) ? Decision.PASS : Decision.rewrite(plain, null);
         }
         // Only the edge (or a trusted local address) may carry a signature.
         if (!fromEdge && !fromAllow) {
@@ -204,20 +276,20 @@ public final class Addon {
                 rejectedLogins.incrementAndGet();
             }
             if (cfg.debug) {
-                log.info("Dropped a signed handshake from " + (ra == null ? "?" : ra.getHostAddress()) + " (not an anycast.ac address)");
+                log.info("Dropped a signed handshake from " + addr(ra) + " (not an anycast.ac address)");
             }
             return Decision.DROP;
         }
         if (k == null) {
             warn("nokey", "Got a signed login but config.yml has no key: the player is seen with the edge address.");
-            return Decision.rewrite(sp.cleaned(), null);
+            return Decision.rewrite(plain, null);
         }
         Payload.Signed s;
         try {
             s = Payload.verify(k, sp.signature());
         } catch (Payload.Invalid e) {
             if (!login || fromAllow) {
-                return Decision.rewrite(sp.cleaned(), null);
+                return Decision.rewrite(plain, null);
             }
             rejectedLogins.incrementAndGet();
             warn("badsig", "Rejected a login: " + e.getMessage()
@@ -228,28 +300,76 @@ public final class Addon {
         long age = now - s.unixTime();
         if (Math.abs(age) > cfg.signatureMaxAgeSeconds) {
             if (!login) {
-                return Decision.rewrite(sp.cleaned(), null);
+                return Decision.rewrite(plain, null);
             }
             rejectedLogins.incrementAndGet();
             warn("clock", "Rejected a login: signature time is " + age + " s off. Check the server clock (NTP).");
             return Decision.kick(KICK_BAD_SIGNATURE);
         }
         if (login) {
-            if (seen.putIfAbsent(s.id(), now) != null) {
-                rejectedLogins.incrementAndGet();
-                warn("replay", "Dropped a repeated login signature from " + ra.getHostAddress());
-                return Decision.DROP;
+            if (seen.size() >= MAX_SEEN) {
+                sweepSeen();
+                if (seen.size() >= MAX_SEEN) {
+                    rejectedLogins.incrementAndGet();
+                    warn("seenfull", "Refused a login: " + MAX_SEEN + " signatures remembered in the last minutes, replay checks are full.");
+                    return Decision.DROP;
+                }
             }
-            if (seen.size() > 20000) {
-                long cut = now - 2L * cfg.signatureMaxAgeSeconds;
-                seen.values().removeIf(t -> t < cut);
+            // A signature is good for one login: the same one again is a replay.
+            if (seen.putIfAbsent(s.id(), s.unixTime()) != null) {
+                rejectedLogins.incrementAndGet();
+                warn("replay", "Dropped a repeated login signature from " + addr(ra));
+                return Decision.DROP;
             }
             verifiedLogins.incrementAndGet();
         }
         if (cfg.debug) {
-            log.info("Verified " + (login ? "login" : "status") + " from " + s.address().getAddress().getHostAddress() + " via " + ra.getHostAddress());
+            log.info("Verified " + (login ? "login" : "status") + " from " + s.address().getAddress().getHostAddress() + " via " + addr(ra));
         }
-        return Decision.rewrite(sp.cleaned(), s.address());
+        return Decision.rewrite(plain, s.address());
+    }
+
+    /**
+     * The server address with at most a Forge marker after "\0". Null when it carries
+     * forwarding data (an address, a UUID, profile JSON, "///"); other unknown extra
+     * data is cut off and the name stays.
+     */
+    static String safeHost(String h) {
+        int z = h.indexOf('\0');
+        String name = z < 0 ? h : h.substring(0, z);
+        if (name.contains("///")) {
+            return null;
+        }
+        if (z < 0) {
+            return h;
+        }
+        String[] rest = h.substring(z + 1).split("\0", -1);
+        if ((rest.length == 1 || (rest.length == 2 && rest[1].isEmpty())) && FORGE_MARKERS.contains(rest[0])) {
+            return h;
+        }
+        for (String part : rest) {
+            String t = part.trim();
+            if (t.contains("///") || Cidr.parse(t) != null || t.matches("[0-9a-fA-F]{32}|[0-9a-fA-F-]{36}")
+                    || t.startsWith("[") || t.startsWith("{")) {
+                return null;
+            }
+        }
+        return name;
+    }
+
+    /** Forgets signatures old enough to fail the time check anyway (the longest allowed age plus a minute). */
+    void sweepSeen() {
+        long cut = System.currentTimeMillis() / 1000 - 600 - 60;
+        seen.values().removeIf(t -> t < cut);
+    }
+
+    private static String addr(InetAddress a) {
+        return a == null ? "?" : a.getHostAddress();
+    }
+
+    /** {@link #warn} for the platform code: same message at most once a minute. */
+    public void warnLimited(String kind, String msg) {
+        warn(kind, msg);
     }
 
     /** Same warning at most once a minute, with the number of repeats. */
@@ -273,12 +393,13 @@ public final class Addon {
         AddonConfig c = cfg;
         List<String> l = new ArrayList<>();
         l.add("AnyCast.ac Minecraft Addon " + version + " (" + platform + ")");
-        l.add("Key: " + (key != null ? "set" : "NOT set") + ", only-anycast: " + (c.onlyAnycast ? "on" : "off"));
+        l.add("Key: " + (key != null ? "set" : "NOT set") + ", direct players: " + (c.allowDirect ? "ALLOWED (allow-direct)" : "blocked"));
         String when = ips.updatedAt() > 0 ? new SimpleDateFormat("yyyy-MM-dd HH:mm").format(new Date(ips.updatedAt())) : "-";
         l.add("Edge addresses: " + ips.size() + " (" + ips.source() + ", " + when + ")"
                 + (ips.lastError().isEmpty() ? "" : ", last error: " + ips.lastError()));
         l.add("Logins verified: " + verifiedLogins.get() + ", rejected: " + rejectedLogins.get()
-                + ", direct connections closed: " + blockedConnections.get());
+                + ", direct connections closed: " + blockedConnections.get()
+                + (c.allowDirect || directLogins.get() > 0 ? ", direct logins: " + directLogins.get() : ""));
         return l;
     }
 

@@ -18,10 +18,15 @@ import java.util.List;
  * Addresses the anycast.ac edge connects from. Order on start: cached copy from the
  * last successful download, otherwise the list built into the jar; then a fresh copy
  * from {@code ip-list-url} every {@code ip-list-refresh-minutes}. A failed or odd
- * download (HTML, empty, too many bad lines) never replaces a working list.
+ * download (HTML, empty, too many bad lines, networks wider than /16 or /32, more
+ * than 1024 entries) never replaces a working list: a spoiled list must not open
+ * the server to everyone.
  */
 public final class IpList {
     private static final int MAX_BYTES = 64 * 1024;
+    static final int MAX_ENTRIES = 1024;
+    static final int MIN_V4 = 16;
+    static final int MIN_V6 = 32;
 
     private final Path cacheFile;
     private final AddonLog log;
@@ -71,7 +76,7 @@ public final class IpList {
         try {
             if (Files.exists(cacheFile)) {
                 List<Cidr> l = Cidr.parseList(Files.readString(cacheFile, StandardCharsets.UTF_8), null);
-                if (!l.isEmpty()) {
+                if (!l.isEmpty() && problem(l) == null) {
                     set(l, "cache", Files.getLastModifiedTime(cacheFile).toMillis());
                     return;
                 }
@@ -88,8 +93,42 @@ public final class IpList {
         }
     }
 
-    /** Downloads a fresh list. Returns true when it was applied. */
+    /** Why a list cannot be used, or null when it is fine. */
+    static String problem(List<Cidr> l) {
+        if (l.isEmpty()) {
+            return "list has no valid addresses";
+        }
+        if (l.size() > MAX_ENTRIES) {
+            return "list has more than " + MAX_ENTRIES + " entries";
+        }
+        for (Cidr c : l) {
+            if (c.tooBroad(MIN_V4, MIN_V6)) {
+                return "list has a network wider than /" + MIN_V4 + " (IPv4) or /" + MIN_V6 + " (IPv6): " + c;
+            }
+        }
+        return null;
+    }
+
+    /** https only; plain http just for a test server on this machine. */
+    static boolean urlAllowed(String url) {
+        try {
+            URI u = URI.create(url);
+            if ("https".equalsIgnoreCase(u.getScheme()) && u.getHost() != null) {
+                return true;
+            }
+            String h = u.getHost();
+            return "http".equalsIgnoreCase(u.getScheme()) && h != null
+                    && (h.equals("127.0.0.1") || h.equals("localhost") || h.equals("[::1]") || h.equals("::1"));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /** Downloads a fresh list. Returns true when it was applied. Never throws: it runs on a timer. */
     public boolean refresh(String url, String userAgent) {
+        if (!urlAllowed(url)) {
+            return fail("ip-list-url must be an https:// address");
+        }
         try {
             HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                     .timeout(Duration.ofSeconds(15))
@@ -114,8 +153,12 @@ public final class IpList {
             }
             int[] bad = {0};
             List<Cidr> l = Cidr.parseList(text, bad);
-            if (l.isEmpty() || bad[0] > l.size()) {
-                return fail("list has no valid addresses");
+            if (bad[0] > l.size()) {
+                return fail("list has more bad lines than addresses");
+            }
+            String why = problem(l);
+            if (why != null) {
+                return fail(why);
             }
             boolean changed = !l.toString().equals(entries.toString());
             set(l, "download", System.currentTimeMillis());
@@ -132,6 +175,9 @@ public final class IpList {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return fail("interrupted");
+        } catch (RuntimeException e) {
+            // An exception would stop the timer for good; keep the old list and try again later.
+            return fail(e.getClass().getSimpleName() + ": " + e.getMessage());
         }
     }
 

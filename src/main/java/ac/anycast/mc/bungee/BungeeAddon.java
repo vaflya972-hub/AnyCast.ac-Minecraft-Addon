@@ -91,19 +91,37 @@ public final class BungeeAddon extends Plugin implements Listener {
             close(conn);
             return;
         }
-        Addon.Decision d = addon.decide(remote, hs.getHost(), hs.getRequestedProtocol());
+        // BungeeCord has already moved everything after "\0" (Forge marker, or forwarding
+        // data a player made up) into InitialHandler.extraDataInHandshake. With ip_forward
+        // off it hands that to the backend as is, so it is checked together with the host.
+        Field extraField = Reflect.field(conn.getClass(), "extraDataInHandshake");
+        String extra = "";
+        try {
+            if (extraField != null && extraField.get(conn) instanceof String x) {
+                extra = x;
+            }
+        } catch (IllegalAccessException ignored) {
+            // field present but closed: the host alone is checked
+        }
+        int intent = hs.getRequestedProtocol();
+        Addon.Decision d = addon.decide(remote, hs.getHost() + extra, intent);
         switch (d.action()) {
             case PASS -> {
             }
             // BungeeCord cannot send a kick before the login state: close quietly, the log says why.
             case DROP, KICK -> close(conn);
             case REWRITE -> {
-                String host = d.host();
+                String full = d.host();
+                int z = full.indexOf('\0');
+                String host = z < 0 ? full : full.substring(0, z);
                 if (host.endsWith(".")) {
                     host = host.substring(0, host.length() - 1);
                 }
                 hs.setHost(host);
                 try {
+                    if (extraField != null) {
+                        extraField.set(conn, z < 0 ? "" : full.substring(z));
+                    }
                     Field vh = Reflect.field(conn.getClass(), "virtualHost");
                     if (vh != null) {
                         vh.set(conn, InetSocketAddress.createUnresolved(host, hs.getPort()));
@@ -112,7 +130,11 @@ public final class BungeeAddon extends Plugin implements Listener {
                         setAddress(conn, d.address());
                     }
                 } catch (Exception | LinkageError ex) {
-                    getLogger().warning("Cannot set the player address on this BungeeCord version: " + ex);
+                    addon.warnLimited("setter", "Cannot set the player address on this BungeeCord version: " + ex
+                            + ". Logins are refused until the addon is updated, otherwise bans by IP would not work.");
+                    if (intent != 1 && d.address() != null) {
+                        close(conn);
+                    }
                 }
             }
         }

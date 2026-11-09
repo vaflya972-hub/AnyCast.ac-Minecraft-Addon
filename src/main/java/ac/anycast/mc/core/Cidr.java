@@ -28,11 +28,11 @@ public final class Cidr {
         int slash = s.indexOf('/');
         if (slash >= 0) {
             addr = s.substring(0, slash);
-            try {
-                bits = Integer.parseInt(s.substring(slash + 1));
-            } catch (NumberFormatException e) {
+            String n = s.substring(slash + 1);
+            if (n.isEmpty() || n.length() > 3 || !n.chars().allMatch(Character::isDigit)) {
                 return null;
             }
+            bits = Integer.parseInt(n);
         }
         byte[] b = literal(addr);
         if (b == null) {
@@ -94,6 +94,20 @@ public final class Cidr {
         return true;
     }
 
+    /** Prefix length: 32 for one IPv4 address, 128 for one IPv6 address. */
+    public int bits() {
+        return bits;
+    }
+
+    public boolean isV6() {
+        return net.length == 16;
+    }
+
+    /** Wider than /16 (IPv4) or /32 (IPv6): too broad to be a list of proxy addresses. */
+    public boolean tooBroad(int minV4, int minV6) {
+        return bits < (isV6() ? minV6 : minV4);
+    }
+
     @Override
     public String toString() {
         return text;
@@ -146,7 +160,8 @@ public final class Cidr {
             return b;
         }
         try {
-            return normalize(InetAddress.getByName(s).getAddress());
+            // Brackets make Java parse an IPv6 literal or fail, never ask DNS.
+            return normalize(InetAddress.getByName("[" + s + "]").getAddress());
         } catch (UnknownHostException e) {
             return null;
         }

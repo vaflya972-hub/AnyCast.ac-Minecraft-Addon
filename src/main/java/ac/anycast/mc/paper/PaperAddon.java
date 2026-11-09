@@ -34,6 +34,7 @@ public final class PaperAddon extends JavaPlugin {
         try {
             addon.start();
             hook();
+            warnBungeeMode();
         } catch (ClassNotFoundException e) {
             getLogger().severe("This server is not Paper. The addon needs Paper or a Paper fork (Purpur, Pufferfish, Folia).");
             getServer().getPluginManager().disablePlugin(this);
@@ -76,6 +77,23 @@ public final class PaperAddon extends JavaPlugin {
         Method add = holder.getMethod("addListener", Key.class, listener);
         add.invoke(null, KEY, proxy);
         hooked = true;
+    }
+
+    /**
+     * spigot.yml bungeecord: true makes Paper believe the address and UUID written into
+     * the handshake. That is right behind your own BungeeCord, and a way to log in as
+     * anybody when players can reach this server. The addon drops such data from players.
+     */
+    private void warnBungeeMode() {
+        try {
+            if (getServer().spigot().getConfig().getBoolean("settings.bungeecord")) {
+                getLogger().warning("spigot.yml has bungeecord: true. Point anycast.ac at your BungeeCord or Velocity proxy, not at this server: "
+                        + "this server takes player addresses and UUIDs from the handshake. The addon drops that data from players, "
+                        + "so players coming straight from anycast.ac cannot join here.");
+            }
+        } catch (Throwable ignored) {
+            // not Spigot-based, nothing to check
+        }
     }
 
     /** net.minecraft.network.Connection is the "packet_handler" of the pipeline. */

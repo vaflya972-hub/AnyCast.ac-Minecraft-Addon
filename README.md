@@ -15,6 +15,18 @@ Paper (и форки), Velocity, BungeeCord. Java 17+.
 
 На BungeeCord поставьте `connection_throttle: -1`: все игроки приходят с адресов anycast.ac, и встроенный лимит начнёт их отбивать.
 
+## Безопасность
+
+Плагин закрывает соединение, если не смог прочитать рукопожатие, и не пускает вход, в котором игрок сам дописал адрес или UUID (так подделывают игрока на серверах с `bungeecord: true`). Если в spigot.yml стоит `bungeecord: true`, направляйте anycast.ac на свой прокси, а не на этот сервер.
+
+Адреса из `allow` проходят мимо всех проверок. Не вписывайте туда 127.0.0.1, если на этой машине работает туннель вроде playit.gg или ngrok: через него придут все игроки.
+
+## Прямой вход
+
+`allow-direct: true` пускает игроков и напрямую на сервер, вместе с игроками через anycast.ac. По умолчанию выключено. Включайте, только если знаете, что делаете: это влияет на безопасность. Прямые игроки идут без защиты anycast.ac от DDoS и ботов, баны и запреты стран из панели на них не действуют, а адрес сервера становится известен, и его могут атаковать в обход anycast.ac. Подпись входа через anycast.ac проверяется как обычно, и прямой игрок не может выдать себя за чужой адрес.
+
+На BungeeCord с `connection_throttle: -1` частоту прямых входов ничто не ограничивает.
+
 ## Команды
 
 `/anycast` показывает состояние, `/anycast reload` перечитывает конфиг. Право `anycast.admin`.
@@ -27,4 +39,4 @@ mvn package
 
 ## English
 
-Plugin for Minecraft servers behind anycast.ac: real player IPs, no connections around anycast.ac. Download the jar from [releases](https://github.com/vaflya972-hub/AnyCast.ac-Minecraft-Addon/releases/latest), put it into `plugins`, restart, then paste the server key from the anycast.ac panel into `config.yml` and run `/anycast reload`.
+Plugin for Minecraft servers behind anycast.ac: real player IPs, no connections around anycast.ac. Download the jar from [releases](https://github.com/vaflya972-hub/AnyCast.ac-Minecraft-Addon/releases/latest), put it into `plugins`, restart, then paste the server key from the anycast.ac panel into `config.yml` and run `/anycast reload`. Addresses in `allow` skip every check, so keep 127.0.0.1 out of it when a tunnel agent runs on the same machine. `allow-direct: true` also lets players join the server directly; it is off by default, leave it off unless you know what you are doing, because direct players get no anycast.ac protection.

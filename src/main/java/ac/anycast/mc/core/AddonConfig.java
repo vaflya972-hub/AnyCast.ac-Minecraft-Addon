@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,11 +17,16 @@ import java.util.Map;
  */
 public final class AddonConfig {
     public String key = "";
-    public boolean onlyAnycast = true;
+    /**
+     * Let players also connect straight to the server, around anycast.ac. Off by default:
+     * they get none of the anycast.ac protection and the server address has to be public.
+     */
+    public boolean allowDirect = false;
     public String ipListUrl = "https://anycast.ac/ips/minecraft.txt";
     public int ipListRefreshMinutes = 10;
-    public List<String> allow = new ArrayList<>(List.of("127.0.0.1", "::1"));
-    public int signatureMaxAgeSeconds = 600;
+    /** Addresses that skip every check. Empty by default: a tunnel agent on the same machine would make every player look like 127.0.0.1. */
+    public List<String> allow = new ArrayList<>();
+    public int signatureMaxAgeSeconds = 120;
     public boolean debug = false;
 
     /** Problems found while reading (unknown keys, bad values). */
@@ -38,25 +44,47 @@ public final class AddonConfig {
                 Files.copy(in, file);
             }
         }
+        try {
+            // The key is a secret: owner only (where the file system has POSIX permissions).
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------"));
+        } catch (UnsupportedOperationException | IOException | SecurityException ignored) {
+            // Windows, read-only mounts, panels that own the file
+        }
         return parse(Files.readString(file, StandardCharsets.UTF_8));
     }
 
     public static AddonConfig parse(String text) {
         AddonConfig c = new AddonConfig();
         Map<String, Object> m = yaml(text, c.warnings);
+        Boolean direct = null;
+        Boolean oldDirect = null;
         for (Map.Entry<String, Object> e : m.entrySet()) {
             Object v = e.getValue();
             switch (e.getKey()) {
                 case "key" -> c.key = str(v);
-                case "only-anycast" -> c.onlyAnycast = bool(v, c.onlyAnycast, e.getKey(), c.warnings);
-                case "ip-list-url" -> c.ipListUrl = str(v);
+                case "allow-direct" -> direct = bool(v, false, e.getKey(), c.warnings);
+                // 1.0.0 name with the opposite meaning: only-anycast: false = allow-direct: true
+                case "only-anycast" -> oldDirect = !bool(v, true, e.getKey(), c.warnings);
+                case "ip-list-url" -> {
+                    String u = str(v);
+                    if (IpList.urlAllowed(u)) {
+                        c.ipListUrl = u;
+                    } else {
+                        c.warnings.add("ip-list-url must be an https:// address, using " + c.ipListUrl);
+                    }
+                }
                 case "ip-list-refresh-minutes" -> c.ipListRefreshMinutes = clamp(num(v, c.ipListRefreshMinutes, e.getKey(), c.warnings), 1, 1440);
                 case "allow" -> c.allow = list(v);
-                case "signature-max-age-seconds" -> c.signatureMaxAgeSeconds = clamp(num(v, c.signatureMaxAgeSeconds, e.getKey(), c.warnings), 30, 86400);
+                case "signature-max-age-seconds" -> c.signatureMaxAgeSeconds = clamp(num(v, c.signatureMaxAgeSeconds, e.getKey(), c.warnings), 30, 600);
                 case "debug" -> c.debug = bool(v, c.debug, e.getKey(), c.warnings);
                 default -> c.warnings.add("unknown key \"" + e.getKey() + "\"");
             }
         }
+        if (direct != null && oldDirect != null && !direct.equals(oldDirect)) {
+            c.warnings.add("allow-direct and the old only-anycast disagree, using allow-direct: " + direct
+                    + ". Remove only-anycast.");
+        }
+        c.allowDirect = direct != null ? direct : oldDirect != null && oldDirect;
         return c;
     }
 
