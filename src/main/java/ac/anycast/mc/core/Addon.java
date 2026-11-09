@@ -19,9 +19,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** Platform-independent part: config, address lists, handshake decisions, counters. */
 public final class Addon {
-    public static final String KICK_UNSIGNED =
-            "AnyCast.ac: вход пришёл без подписи. Сообщите администратору сервера.\n"
-            + "AnyCast.ac: this login was not signed. Please tell the server administrator.";
     public static final String KICK_BAD_SIGNATURE =
             "AnyCast.ac: подпись входа не прошла проверку. Сообщите администратору сервера.\n"
             + "AnyCast.ac: login signature check failed. Please tell the server administrator.";
@@ -167,6 +164,28 @@ public final class Addon {
         return a != null && allowed(a);
     }
 
+    /**
+     * The key is set: from an anycast.ac address only signed handshakes pass. Without it any
+     * anycast.ac account could point its own server at this address and read the MOTD
+     * through anycast.ac, which is how a hidden server gets found.
+     */
+    public boolean signing() {
+        return key != null;
+    }
+
+    /** Startup checks: things that give the server address away around anycast.ac. */
+    public void warnExposure(boolean queryOn, boolean geyser) {
+        if (queryOn) {
+            log.warn("Query (UDP) is on: anyone can ask this server's own address for its MOTD, players and plugins, around anycast.ac, "
+                    + "and that is how a hidden server gets found. Turn it off: enable-query=false in server.properties, "
+                    + "[query] enabled = false in velocity.toml, query_enabled: false in BungeeCord config.yml.");
+        }
+        if (geyser) {
+            log.warn("Geyser is installed: Bedrock players connect to this server's own address over UDP, around anycast.ac, "
+                    + "and that port answers anyone with the MOTD. Anyone can find this server's address through it.");
+        }
+    }
+
     /** An anycast.ac edge address. */
     public boolean edge(InetAddress a) {
         return a != null && ips.contains(a);
@@ -239,6 +258,17 @@ public final class Addon {
         // Forwarding data from a player ("name\0IP\0UUID" of BungeeCord, "///" of TCPShield):
         // a server in BungeeCord mode would take it as the real address and UUID.
         // Only a proxy from the allow list may send it.
+        // Neither anycast.ac nor the allow list: only when direct players are allowed. On
+        // Paper and Velocity such connections are closed before the handshake; here they can
+        // only come when the address was changed before the addon (PROXY protocol on BungeeCord).
+        if (!fromEdge && !fromAllow && !cfg.allowDirect) {
+            if (login) {
+                rejectedLogins.incrementAndGet();
+            }
+            warn("notedge", "Closed a handshake from " + addr(ra) + ", not an anycast.ac address. "
+                    + "If PROXY protocol is on in this server or proxy, turn it off: anycast.ac sends the player address in the signature.");
+            return Decision.DROP;
+        }
         if (!fromAllow) {
             String safe = safeHost(plain);
             if (safe == null) {
@@ -253,14 +283,22 @@ public final class Addon {
         }
 
         if (sp == null) {
-            if (login && fromEdge && !fromAllow) {
+            if (fromEdge && !fromAllow) {
                 if (k != null) {
-                    rejectedLogins.incrementAndGet();
-                    warn("unsigned", "Rejected a login through anycast.ac without a signature (" + addr(ra)
-                            + "). Set \"Player address: Plugin\" for this server in the anycast.ac panel.");
-                    return Decision.kick(KICK_UNSIGNED);
+                    // Closed without a word, pings too: an answer here would tell another anycast.ac
+                    // account that points its server at this address what is running here.
+                    if (login) {
+                        rejectedLogins.incrementAndGet();
+                    }
+                    warn("unsigned", "Closed an unsigned " + (login ? "login" : "ping") + " from anycast.ac (" + addr(ra)
+                            + "). Set \"Player address: Plugin\" for this server in the anycast.ac panel. "
+                            + "If it is set, another anycast.ac account has pointed its server at this address.");
+                    return Decision.DROP;
                 }
-                warn("nokey", "Players come through anycast.ac but config.yml has no key, so they are seen with the edge address.");
+                if (login) {
+                    warn("nokey", "Players come through anycast.ac but config.yml has no key: they are seen with the edge address, "
+                            + "and any anycast.ac account that points its server at this address gets through too.");
+                }
             }
             if (login && !fromEdge && !fromAllow) {
                 directLogins.incrementAndGet();
@@ -288,13 +326,17 @@ public final class Addon {
         try {
             s = Payload.verify(k, sp.signature());
         } catch (Payload.Invalid e) {
-            if (!login || fromAllow) {
+            if (fromAllow) {
                 return Decision.rewrite(plain, null);
             }
-            rejectedLogins.incrementAndGet();
-            warn("badsig", "Rejected a login: " + e.getMessage()
-                    + ". The key in config.yml must be the key of THIS server in the anycast.ac panel.");
-            return Decision.kick(KICK_BAD_SIGNATURE);
+            // Another key: another anycast.ac server. Closed quietly, as an unsigned one.
+            if (login) {
+                rejectedLogins.incrementAndGet();
+            }
+            warn("badsig", "Closed a " + (login ? "login" : "ping") + " from anycast.ac: " + e.getMessage()
+                    + ". The key in config.yml must be the key of THIS server in the anycast.ac panel. "
+                    + "If it is, another anycast.ac account has pointed its server at this address.");
+            return Decision.DROP;
         }
         long now = System.currentTimeMillis() / 1000;
         long age = now - s.unixTime();

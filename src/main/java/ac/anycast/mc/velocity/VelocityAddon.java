@@ -55,6 +55,13 @@ public final class VelocityAddon {
         try {
             addon.start();
             hook();
+            boolean query = false;
+            try {
+                query = proxy.getConfiguration().isQueryEnabled();
+            } catch (Throwable ignored) {
+                // older API
+            }
+            addon.warnExposure(query, proxy.getPluginManager().getPlugin("geyser").isPresent());
         } catch (Exception ex) {
             logger.error("Cannot start, players will NOT be checked: {}", ex.toString());
             return;

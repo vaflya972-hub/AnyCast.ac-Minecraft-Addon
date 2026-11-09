@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -253,25 +254,67 @@ class AddonTest {
     }
 
     @Test
-    void unsignedLoginFromEdgeIsKicked() {
+    void unsignedLoginFromEdgeIsClosedQuietly() {
         Conn c = new Conn(addon, EDGE);
         c.send(concat(handshake("mc.example.com", 2), LOGIN_START));
-        ByteBuf out = c.ch.readOutbound();
-        assertNotNull(out, "login disconnect expected");
-        String s = out.toString(StandardCharsets.UTF_8);
-        out.release();
-        assertTrue(s.contains("AnyCast.ac"), s);
+        assertNull(c.ch.readOutbound(), "no kick text: it would tell a stranger what runs here");
         assertFalse(c.ch.isActive());
         assertEquals(0, c.server.got.size());
+        assertEquals(1, addon.rejectedLogins.get());
     }
 
     @Test
-    void statusPassesUnchanged() {
+    void signedStatusGetsRealAddress() throws Exception {
         Conn c = new Conn(addon, EDGE);
-        byte[] in = concat(handshake("mc.example.com", 1), new byte[] {1, 0});
-        c.send(in);
-        assertArrayEquals(in, c.server.got.toByteArray());
+        c.send(concat(handshake("mc.example.com///" + sig("203.0.113.7", 50000, now()), 1), new byte[] {1, 0}));
         assertTrue(c.ch.isActive());
+        assertEquals(new InetSocketAddress(InetAddress.getByName("203.0.113.7"), 50000), c.server.address);
+        assertArrayEquals(concat(handshake("mc.example.com", 1), new byte[] {1, 0}), c.server.got.toByteArray());
+        assertEquals(0, addon.verifiedLogins.get(), "a ping is not a login");
+    }
+
+    /** No key in config.yml: the addon only locks the server to anycast.ac addresses. */
+    void noKey() throws Exception {
+        Files.writeString(dir.resolve("config.yml"), "key: \"\"\nip-list-url: \"http://127.0.0.1:1/none\"\nallow:\n  - 127.0.0.1\n");
+        addon.reload();
+    }
+
+    /**
+     * Another anycast.ac account points its server at this address and probes it through
+     * anycast.ac: from our edge, without this server's key. Nothing may come back, not even
+     * a kick text, and nothing may reach the server.
+     */
+    @Test
+    void anotherAccountThroughTheEdgeLearnsNothing() throws Exception {
+        byte[] other = KEY.clone();
+        other[0] ^= 1;
+        String foreign = Payload.sign(other, new InetSocketAddress(InetAddress.getByName("203.0.113.7"), 1), now());
+        byte[] ping = {1, 0};
+        byte[][] probes = {
+            concat(handshake("mc.example.com", 1), ping),
+            concat(handshake("mc.example.com", 2), LOGIN_START),
+            concat(handshake("mc.example.com", 3), LOGIN_START),
+            concat(handshake("mc.example.com///" + foreign, 1), ping),
+            concat(handshake("mc.example.com///" + foreign, 2), LOGIN_START),
+            concat(handshake("mc.example.com///" + "A".repeat(38), 1), ping),
+            concat(handshake("mc.example.com\0FML3\0", 1), ping),
+            {(byte) 0xFE},
+            {(byte) 0xFE, 1},
+            {(byte) 0xFE, 1, (byte) 0xFA, 0, 11},
+            concat("PROXY TCP4 203.0.113.7 10.0.0.1 5000 25565\r\n".getBytes(StandardCharsets.US_ASCII), concat(handshake("mc.example.com", 1), ping)),
+            concat(HandshakeHandler.PROXY_V2, new byte[] {0x21, 0x11, 0, 12, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 0, 2}),
+            // 'G' reads as a 71-byte frame: long enough to be read whole
+            ("GET / HTTP/1.1\r\nHost: mc.example.com\r\nUser-Agent: scanner\r\nX-Pad: " + "a".repeat(40) + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII),
+        };
+        for (byte[] probe : probes) {
+            Conn c = new Conn(addon, EDGE);
+            c.send(probe);
+            String what = HexFormat.of().formatHex(probe, 0, Math.min(probe.length, 16));
+            assertFalse(c.ch.isActive(), what);
+            assertNull(c.ch.readOutbound(), "answered to " + what);
+            assertEquals(0, c.server.got.size(), "reached the server: " + what);
+        }
+        assertEquals(0, addon.verifiedLogins.get());
     }
 
     @Test
@@ -323,10 +366,19 @@ class AddonTest {
     }
 
     @Test
-    void legacyPingPasses() {
+    void legacyPingOnlyWithoutKey() throws Exception {
+        byte[] fe = {(byte) 0xFE, 1, (byte) 0xFA};
+        Conn signed = new Conn(addon, EDGE);
+        signed.send(fe);
+        assertFalse(signed.ch.isActive(), "an old ping cannot be signed: closed when the key is set");
+        assertEquals(0, signed.server.got.size());
+        Conn own = new Conn(addon, "127.0.0.1");
+        own.send(fe);
+        assertArrayEquals(fe, own.server.got.toByteArray(), "the allow list may ping");
+        noKey();
         Conn c = new Conn(addon, EDGE);
-        c.send(new byte[] {(byte) 0xFE, 1, (byte) 0xFA});
-        assertArrayEquals(new byte[] {(byte) 0xFE, 1, (byte) 0xFA}, c.server.got.toByteArray());
+        c.send(fe);
+        assertArrayEquals(fe, c.server.got.toByteArray());
     }
 
     @Test
@@ -393,7 +445,8 @@ class AddonTest {
     }
 
     @Test
-    void nothingAfterAnOldPing() {
+    void nothingAfterAnOldPing() throws Exception {
+        noKey();
         Conn c = new Conn(addon, EDGE);
         c.send(new byte[] {(byte) 0xFE});
         assertTrue(c.ch.isActive());
@@ -430,6 +483,12 @@ class AddonTest {
     @Test
     void proxyHeaderOnlyFromAnycast() throws Exception {
         byte[] v1 = "PROXY TCP4 203.0.113.7 10.0.0.1 5000 25565\r\n".getBytes(StandardCharsets.US_ASCII);
+        Conn signing = new Conn(addon, EDGE);
+        signing.send(concat(v1, handshake("mc.example.com", 2)));
+        assertFalse(signing.ch.isActive(), "with a key the edge never sends PROXY");
+        assertEquals(0, signing.server.got.size());
+
+        noKey();
         Conn edge = new Conn(addon, EDGE);
         edge.send(concat(v1, handshake("mc.example.com", 2)));
         assertTrue(edge.ch.isActive());

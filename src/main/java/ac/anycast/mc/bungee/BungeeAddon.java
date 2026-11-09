@@ -8,11 +8,15 @@ import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
 import net.md_5.bungee.api.CommandSender;
 import net.md_5.bungee.api.chat.TextComponent;
 import net.md_5.bungee.api.connection.PendingConnection;
 import net.md_5.bungee.api.event.PlayerHandshakeEvent;
+import net.md_5.bungee.api.event.ProxyPingEvent;
 import net.md_5.bungee.api.plugin.Command;
 import net.md_5.bungee.api.plugin.Listener;
 import net.md_5.bungee.api.plugin.Plugin;
@@ -27,6 +31,8 @@ import net.md_5.bungee.protocol.packet.Handshake;
 public final class BungeeAddon extends Plugin implements Listener {
     private Addon addon;
     private boolean connectGate;
+    /** Connections whose handshake carried a valid signature (the edge pings with its own address too). */
+    private final Map<PendingConnection, Boolean> signed = Collections.synchronizedMap(new WeakHashMap<>());
 
     @Override
     public void onEnable() {
@@ -53,6 +59,15 @@ public final class BungeeAddon extends Plugin implements Listener {
         } catch (Throwable ignored) {
             // older API
         }
+        boolean query = false;
+        try {
+            for (net.md_5.bungee.api.config.ListenerInfo l : getProxy().getConfig().getListeners()) {
+                query |= l.isQueryEnabled();
+            }
+        } catch (Throwable ignored) {
+            // older API
+        }
+        addon.warnExposure(query, getProxy().getPluginManager().getPlugin("Geyser-BungeeCord") != null);
         getProxy().getPluginManager().registerCommand(this, new Command("anycast", "anycast.admin") {
             @Override
             public void execute(CommandSender sender, String[] args) {
@@ -127,6 +142,7 @@ public final class BungeeAddon extends Plugin implements Listener {
                         vh.set(conn, InetSocketAddress.createUnresolved(host, hs.getPort()));
                     }
                     if (d.address() != null) {
+                        signed.put(conn, Boolean.TRUE);
                         setAddress(conn, d.address());
                     }
                 } catch (Exception | LinkageError ex) {
@@ -137,6 +153,27 @@ public final class BungeeAddon extends Plugin implements Listener {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Pings that never reach PlayerHandshakeEvent: pre-1.7 (0xFE) pings, and on builds
+     * without ClientConnectEvent direct ones too. From anycast.ac, with a key in config.yml,
+     * only a ping whose handshake was signed gets an answer.
+     */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onPing(ProxyPingEvent e) {
+        PendingConnection conn = e.getConnection();
+        SocketAddress sa = conn == null ? null : conn.getSocketAddress();
+        if (!(sa instanceof InetSocketAddress isa) || isa.getAddress() == null) {
+            return;
+        }
+        java.net.InetAddress a = isa.getAddress();
+        if (addon.trusted(a) || signed.containsKey(conn)) {
+            return;
+        }
+        if ((addon.edge(a) && addon.signing()) || (!connectGate && !addon.acceptsConnection(a))) {
+            close(conn); // the answer is then written to a closed channel and never leaves
         }
     }
 

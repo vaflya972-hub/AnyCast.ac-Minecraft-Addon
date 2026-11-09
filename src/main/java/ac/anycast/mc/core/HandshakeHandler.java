@@ -23,8 +23,10 @@ import java.util.concurrent.TimeUnit;
  *   <li>removes itself, so the rest of the connection costs nothing.</li>
  * </ol>
  * Anything it cannot read is closed, not passed on: a check that steps aside on odd
- * input is a check that can be walked around. The only exceptions are pre-1.7 pings,
- * a PROXY protocol header from anycast.ac, and addresses from the allow list.
+ * input is a check that can be walked around. With a key in config.yml everything
+ * from anycast.ac must be signed (logins and pings), so another anycast.ac account that
+ * points its server at this address learns nothing. The only exceptions are addresses
+ * from the allow list and, without a key, pre-1.7 pings and a PROXY protocol header.
  */
 public final class HandshakeHandler extends ChannelInboundHandlerAdapter {
     public static final String NAME = "anycast-addon";
@@ -147,8 +149,14 @@ public final class HandshakeHandler extends ChannelInboundHandlerAdapter {
             return;
         }
         if (px == YES) {
-            if (edge || trusted) {
+            if (trusted || (edge && !addon.signing())) {
                 pass(ctx);
+            } else if (edge) {
+                // With a key the edge never sends PROXY: this is another anycast.ac account's
+                // server in PROXY mode pointed at this address.
+                addon.warnLimited("proxyedge", "Closed a PROXY protocol header from anycast.ac: this server uses the plugin signature. "
+                        + "If the panel says \"Player address: PROXY protocol\" for it, choose Plugin.");
+                drop(ctx);
             } else {
                 addon.warnLimited("proxyheader", "Closed a direct connection that sent a PROXY protocol header: only anycast.ac may send one.");
                 drop(ctx);
@@ -161,6 +169,15 @@ public final class HandshakeHandler extends ChannelInboundHandlerAdapter {
                 return;
             }
             if (lg == YES) {
+                if (edge && !trusted && addon.signing()) {
+                    // An old ping cannot carry a signature, and anycast.ac never forwards one to a
+                    // server with the plugin: it would hand the MOTD to anyone routing here.
+                    if (addon.debug()) {
+                        addon.log().info("Closed an old (0xFE) ping from anycast.ac " + ctx.channel().remoteAddress());
+                    }
+                    drop(ctx);
+                    return;
+                }
                 legacy = end - r;
                 legacy16 = end - r >= 3;
                 ByteBuf b = buf;

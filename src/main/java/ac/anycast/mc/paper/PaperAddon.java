@@ -35,6 +35,7 @@ public final class PaperAddon extends JavaPlugin {
             addon.start();
             hook();
             warnBungeeMode();
+            addon.warnExposure(queryOn(), getServer().getPluginManager().getPlugin("Geyser-Spigot") != null);
         } catch (ClassNotFoundException e) {
             getLogger().severe("This server is not Paper. The addon needs Paper or a Paper fork (Purpur, Pufferfish, Folia).");
             getServer().getPluginManager().disablePlugin(this);
@@ -93,6 +94,17 @@ public final class PaperAddon extends JavaPlugin {
             }
         } catch (Throwable ignored) {
             // not Spigot-based, nothing to check
+        }
+    }
+
+    /** enable-query in server.properties (the server runs from its own folder). */
+    private static boolean queryOn() {
+        try (java.io.Reader r = java.nio.file.Files.newBufferedReader(java.nio.file.Path.of("server.properties"))) {
+            java.util.Properties p = new java.util.Properties();
+            p.load(r);
+            return Boolean.parseBoolean(p.getProperty("enable-query", "false").trim());
+        } catch (Exception e) {
+            return false;
         }
     }
 
