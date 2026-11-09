@@ -61,6 +61,9 @@ public final class Addon {
     private ScheduledExecutorService exec;
     private ScheduledFuture<?> refreshTask;
     private ScheduledFuture<?> sweepTask;
+    private final UpdateCheck updates;
+    private volatile UpdateCheck.Result versionState;
+    private int versionTicks;
 
     public Addon(Path dir, AddonLog log, String platform) {
         this.dir = dir;
@@ -68,6 +71,8 @@ public final class Addon {
         this.platform = platform;
         this.version = readVersion();
         this.ips = new IpList(dir, log);
+        this.updates = new UpdateCheck(dir);
+        this.versionState = UpdateCheck.Result.unknown(version);
     }
 
     /** Reads config, loads the cached list and starts the background refresh. */
@@ -79,6 +84,45 @@ public final class Addon {
         });
         ips.loadLocal();
         reload();
+        exec.scheduleWithFixedDelay(this::versionTick, 1, 1, TimeUnit.MINUTES);
+    }
+
+    /**
+     * Version check at startup, before players come. Logs the banner and returns true
+     * when the update is critical: the platform then stops the server.
+     */
+    public boolean versionBlocksStart() {
+        UpdateCheck.Result r = updates.check(version, userAgent());
+        versionState = r;
+        int times = r.level() == UpdateCheck.Level.CRITICAL ? 3 : 1;
+        for (int i = 0; i < times; i++) {
+            for (String line : UpdateCheck.banner(r)) {
+                log.warn(line);
+            }
+        }
+        return r.level() == UpdateCheck.Level.CRITICAL;
+    }
+
+    /** Every minute: a critical update is repeated each minute, an ordinary one every 10 minutes. */
+    private void versionTick() {
+        try {
+            int n = ++versionTicks;
+            if (n % 10 == 0) {
+                versionState = updates.check(version, userAgent());
+            }
+            UpdateCheck.Result r = versionState;
+            if (r.level() == UpdateCheck.Level.CRITICAL || (r.level() == UpdateCheck.Level.OUTDATED && n % 10 == 0)) {
+                for (String line : UpdateCheck.banner(r)) {
+                    log.warn(line);
+                }
+            }
+        } catch (RuntimeException e) {
+            // the timer must keep going
+        }
+    }
+
+    public UpdateCheck.Result versionState() {
+        return versionState;
     }
 
     public synchronized void stop() {
@@ -435,6 +479,13 @@ public final class Addon {
         AddonConfig c = cfg;
         List<String> l = new ArrayList<>();
         l.add("AnyCast.ac Minecraft Addon " + version + " (" + platform + ")");
+        UpdateCheck.Result v = versionState;
+        switch (v.level()) {
+            case OK -> l.add("Version: up to date (latest " + v.latest() + ")");
+            case OUTDATED -> l.add("Version: UPDATE AVAILABLE, " + v.latest() + " is out: " + UpdateCheck.RELEASES + "/latest");
+            case CRITICAL -> l.add("Version: CRITICAL UPDATE, " + v.required() + " or newer is required: " + UpdateCheck.RELEASES + "/latest");
+            default -> l.add("Version: not checked yet" + (updates.lastError().isEmpty() ? "" : " (" + updates.lastError() + ")"));
+        }
         l.add("Key: " + (key != null ? "set" : "NOT set") + ", direct players: " + (c.allowDirect ? "ALLOWED (allow-direct)" : "blocked"));
         String when = ips.updatedAt() > 0 ? new SimpleDateFormat("yyyy-MM-dd HH:mm").format(new Date(ips.updatedAt())) : "-";
         l.add("Edge addresses: " + ips.size() + " (" + ips.source() + ", " + when + ")"

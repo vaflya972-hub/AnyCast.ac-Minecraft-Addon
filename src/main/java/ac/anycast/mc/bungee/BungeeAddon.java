@@ -68,6 +68,10 @@ public final class BungeeAddon extends Plugin implements Listener {
             // older API
         }
         addon.warnExposure(query, getProxy().getPluginManager().getPlugin("Geyser-BungeeCord") != null);
+        if (addon.versionBlocksStart()) {
+            getProxy().stop("AnyCast.ac Minecraft Addon: critical update required, see the console");
+            return;
+        }
         getProxy().getPluginManager().registerCommand(this, new Command("anycast", "anycast.admin") {
             @Override
             public void execute(CommandSender sender, String[] args) {

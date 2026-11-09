@@ -391,7 +391,7 @@ class AddonTest {
         assertEquals(EDGE, ((InetSocketAddress) c.server.address).getHostString());
         assertArrayEquals(concat(handshake("mc.example.com", 2), LOGIN_START), c.server.got.toByteArray());
         List<String> st = new ArrayList<>(addon.status());
-        assertTrue(st.get(1).contains("NOT set"), st.toString());
+        assertTrue(st.stream().anyMatch(x -> x.startsWith("Key: NOT set")), st.toString());
     }
 
     // ---- 1.1.0: closed holes -------------------------------------------------

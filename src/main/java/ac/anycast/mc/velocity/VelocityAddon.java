@@ -62,6 +62,10 @@ public final class VelocityAddon {
                 // older API
             }
             addon.warnExposure(query, proxy.getPluginManager().getPlugin("geyser").isPresent());
+            if (addon.versionBlocksStart()) {
+                proxy.shutdown(Component.text("AnyCast.ac Minecraft Addon: critical update required, see the console"));
+                return;
+            }
         } catch (Exception ex) {
             logger.error("Cannot start, players will NOT be checked: {}", ex.toString());
             return;

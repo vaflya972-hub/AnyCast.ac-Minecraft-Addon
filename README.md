@@ -35,6 +35,10 @@ Paper (и форки), Velocity, BungeeCord. Java 17+.
 
 На BungeeCord с `connection_throttle: -1` частоту прямых входов ничто не ограничивает.
 
+## Обновления
+
+При запуске и раз в 10 минут плагин сверяет версию с anycast.ac. Если вышла новая, в консоли появится просьба обновиться. Если обновление критичное, сервер не запустится, пока плагин не обновлён, а уже запущенный будет напоминать в консоли каждую минуту. `/anycast` показывает, актуальна ли версия.
+
 ## Команды
 
 `/anycast` показывает состояние, `/anycast reload` перечитывает конфиг. Право `anycast.admin`.
@@ -47,4 +51,4 @@ mvn package
 
 ## English
 
-Plugin for Minecraft servers behind anycast.ac: real player IPs, no connections around anycast.ac. Download the jar from [releases](https://github.com/vaflya972-hub/AnyCast.ac-Minecraft-Addon/releases/latest), put it into `plugins`, restart, then paste the server key from the anycast.ac panel into `config.yml` and run `/anycast reload`. Addresses in `allow` skip every check, so keep 127.0.0.1 out of it when a tunnel agent runs on the same machine. `allow-direct: true` also lets players join the server directly; it is off by default, leave it off unless you know what you are doing, because direct players get no anycast.ac protection. Keep the key set: without it any anycast.ac account can point its server at your address and read your MOTD through anycast.ac. Turn query off and keep Geyser, web maps and sites off the server address.
+Plugin for Minecraft servers behind anycast.ac: real player IPs, no connections around anycast.ac. Download the jar from [releases](https://github.com/vaflya972-hub/AnyCast.ac-Minecraft-Addon/releases/latest), put it into `plugins`, restart, then paste the server key from the anycast.ac panel into `config.yml` and run `/anycast reload`. Addresses in `allow` skip every check, so keep 127.0.0.1 out of it when a tunnel agent runs on the same machine. `allow-direct: true` also lets players join the server directly; it is off by default, leave it off unless you know what you are doing, because direct players get no anycast.ac protection. Keep the key set: without it any anycast.ac account can point its server at your address and read your MOTD through anycast.ac. Turn query off and keep Geyser, web maps and sites off the server address. The addon checks its version with anycast.ac at startup and every 10 minutes: it asks you to update in the console, and after a critical update the server will not start until the addon is updated.

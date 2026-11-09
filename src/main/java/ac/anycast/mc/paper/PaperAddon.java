@@ -36,6 +36,10 @@ public final class PaperAddon extends JavaPlugin {
             hook();
             warnBungeeMode();
             addon.warnExposure(queryOn(), getServer().getPluginManager().getPlugin("Geyser-Spigot") != null);
+            if (addon.versionBlocksStart()) {
+                getServer().shutdown();
+                return;
+            }
         } catch (ClassNotFoundException e) {
             getLogger().severe("This server is not Paper. The addon needs Paper or a Paper fork (Purpur, Pufferfish, Folia).");
             getServer().getPluginManager().disablePlugin(this);
